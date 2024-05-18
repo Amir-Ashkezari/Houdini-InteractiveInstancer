@@ -8,58 +8,30 @@ Date Created:   May 12, 2024 - 23:43:07
 
 import hou
 import viewerstate.utils as su
+import nodegeo as ng
 
 
 class State:
     MSG = 'LMB to add points to the construction plane.'
-
-    xform_parm_pairs = {
-    'tx': 't_x', 'ty': 't_y', 'tz': 't_z',
-    'rx': 'r_x', 'ry': 'r_y', 'rz': 'r_z',
-    'sx': 's_x', 'sy': 's_y', 'sz': 's_z',
-    'uniform_scale': 'uniformscale_'
-    }
 
     def __init__(self, state_name, scene_viewer) -> None:
         self.state_name = state_name
         self.scene_viewer = scene_viewer
 
         self.node: hou.Node = None
-        self._geometry: hou.Geometry = hou.Geometry()
+        self.gd: ng.GeometryData = None
         self.pressed = False
 
         self.xform_handle = hou.Handle(scene_viewer, 'xform_handle')
         self.xform_handle.update()
     # end __init__
-        
-    def initGeometry(self) -> None:
-        geo_ptc_parm: hou.Parm = self.node.parm('geo_ptc')
-        geo_ptc: hou.Geometry = geo_ptc_parm.evalAsGeometry()
-
-        if geo_ptc:
-            self._geometry.copy(geo_ptc)
-
-        if not self._geometry.points():
-            orient_attrib: hou.Attrib = self._geometry.addAttrib(
-                hou.attribType.Point, 'orient', [0.0, 0.0, 0.0, 0.0])
-            scale_attrib: hou.Attrib = self._geometry.addAttrib(
-                hou.attribType.Point, 'scale', [1.0, 1.0, 1.0])
-            pscale_attrib: hou.Attrib = self._geometry.addAttrib(
-                hou.attribType.Point, 'pscale', 1.0)
-            id_attrib: hou.Attrib = self._geometry.addAttrib(
-                hou.attribType.Point, 'id', 0)
-            orient_attrib.setOption('type', 'quaternion')
-            scale_attrib.setOption('type', 'vector')
-            pscale_attrib.setOption('type', 'float')
-            id_attrib.setOption('type', 'int')
-    # end initGeometry
-                
+                        
     def onEnter(self, kwargs) -> None:
         self.node = kwargs['node']
         if not self.node:
             raise
         
-        self.initGeometry() 
+        self.gd = ng.GeometryData(self.node)
         self.scene_viewer.setPromptMessage(State.MSG)
     # end onEnter
 
@@ -74,27 +46,15 @@ class State:
     # end onResume
 
     def onExit(self,kwargs) -> None:
-        """ Called when the state terminates
+        """ Called when the state terminates. 
         """
         state_parms = kwargs['state_parms']
     # end onExit
 
-    def getLastPoint(self) -> tuple[hou.Point, int]:
-        """ Reterive the last point and it's id from the geometry. 
-        """
-        geo_ptc: hou.Geometry = self.node.parm('geo_ptc').evalAsGeometry()
-        if geo_ptc and geo_ptc.points():
-            last_pt: hou.Point = geo_ptc.iterPoints()[-1]
-            last_id = last_pt.attribValue('id')
-            return (last_pt, last_id)
-
-        return (None, 0)
-    # end getLastPoint
-
     def start(self, position) -> None:
         if not self.pressed:
             self.scene_viewer.beginStateUndo('Add point')
-            self.genPointcloud(position)
+            self.gd.genPointcloud(position)
 
         self.pressed = True
     # end start
@@ -105,17 +65,6 @@ class State:
         self.pressed = False
     # end finish
     
-    def genPointcloud(self, position) -> None:
-        """ generate a point and assign id
-        """
-        _, last_id = self.getLastPoint()
-        pt: hou.Point = self._geometry.createPoint()
-        pt.setPosition(position)
-        pt.setAttribValue('id', last_id + 1)
-
-        self.node.parm('geo_ptc').set(self._geometry)
-    # end genPointcloud
-
     def onMouseEvent(self, kwargs) -> bool:
         """ Find the position of the point to add by 
             intersecting the construction plane. 
@@ -139,7 +88,7 @@ class State:
     # end onMouseEvent
 
     def onMouseWheelEvent(self, kwargs) -> bool:
-        """ Process a mouse wheel event
+        """ Process a mouse wheel event.
         """
         ui_event = kwargs['ui_event']
         state_parms = kwargs['state_parms']
@@ -153,60 +102,38 @@ class State:
     # end onBeginHandleToState
 
     def onHandleToState(self, kwargs) -> None:
-        # Called when the user manipulates a handle
+        """ Called when the user manipulates a handle.
+        """
         handle_name = kwargs['handle']
         parms = kwargs['parms']
         prev_parms = kwargs['prev_parms']
 
-        # for parm_name in kwargs['mod_parms']:
-        #     old_value = prev_parms[parm_name]
-        #     new_value = parms[parm_name]
-        #     print(new_value)
-        #     print("%s was: %s now: %s" % (parm_name, old_value, new_value))
-
-        point: hou.Point = self.getLastPoint()
-        if not point:
+        last_pt, _ = self.gd.getLastPoint()
+        if not last_pt:
             return
-        
-        # for key, value in State.xform_parm_pairs.items():
-        #     parm_name = value.replace('_', str(points))
-        #     self.node.parm(parm_name).set(parms[key])
+
+        self.gd.setPointTransform(parms, last_pt)
     # end onHandleToState
 
     def onStateToHandle(self, kwargs) -> None:
-        # Called when the user changes parameter(s), so you can update
-        # dynamic handles if necessary
+        """ Called when the user changes parameter(s), 
+            so you can update dynamic handles if necessary
+        """
         parms = kwargs["parms"]
 
-        # pt = self.getLastPoint()
-        # if not pt:
-        #     return
-
-        # for key, value in State.xform_parm_pairs.items():
-        #     parm_name = value.replace('_', str(points))
-        #     parms[key] = self.node.parm(parm_name).eval()
+        last_pt, _ = self.getLastPoint()
+        if not last_pt:
+            return
+        
+        pos, rot, scale, uniformscale = self.gd.getPointTransform(last_pt)
+        parms['tx'], parms['ty'], parms['tz'] = pos.x(), pos.y(), pos.z()
+        parms['rx'], parms['ry'], parms['rz'] = rot.x(), rot.y(), rot.z()
+        parms['sx'], parms['sy'], parms['sz'] = scale.x(), scale.y(), scale.z()
+        parms['uniform_scale'] = uniformscale
     # end onStateToHandle
 
     def onEndHandleToState(self, kwargs) -> None:
         handle_name = kwargs["handle"]
         ui_event = kwargs["ui_event"]
     # end onEndHandleToState
-        
-    @staticmethod
-    def sopGeometryIntersection(geometry, ray_origin, ray_dir) -> tuple:
-        """ Make objects for the intersect() method to modify. """
-        position = hou.Vector3()
-        normal = hou.Vector3()
-        uvw = hou.Vector3()
-        # Try intersecting the ray with the geometry
-        intersected = geometry.intersect(
-            ray_origin, ray_dir, position, normal, uvw
-        )
-        # Returns a tuple of four values:
-        # - the primitive number of the primitive hit, or -1 if the ray didn't hit
-        # - the 3D position of the intersection point (as Vector3)
-        # - the normal of the ray to the hit primitive (as Vector3)
-        # - the uvw coordinates of the intersection on the primitive (as Vector3)
-        return (intersected, position, normal, uvw)
-    # end sopGeometryIntersection
 # end State
