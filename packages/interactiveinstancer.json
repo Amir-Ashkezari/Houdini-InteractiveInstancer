@@ -1,0 +1,16 @@
+{
+    "enable": true,
+    "load_package_once": true,
+    "env": [
+        { 
+            "ROOT": "D:/Cache/Programming/Python/Houdini/interactiveinstancer" 
+        },
+        {
+            "HOUDINI_PATH": 
+            {
+                "value": "${ROOT}",
+                "method": "prepend"
+            } 
+        }
+    ]
+}
