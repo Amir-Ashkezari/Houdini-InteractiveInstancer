@@ -8,7 +8,163 @@ Date Created:   May 12, 2024 - 23:43:07
 
 import hou
 import viewerstate.utils as su
-import nodegeo as ng
+from enum import Enum
+
+
+class GeometryParm:
+    def __init__(self, node) -> None:
+        self.node: hou.Node = node
+        self.geometry: hou.Geometry = hou.Geometry()
+        self.point: hou.Point = None
+        self.selection: hou.Selection = None
+
+        self.initGeometry()
+    # end __init__
+        
+    def initGeometry(self) -> None:
+        geo_ptc_parm: hou.Parm = self.node.parm('geo_ptc')
+        geo_ptc: hou.Geometry = geo_ptc_parm.evalAsGeometry()
+
+        if geo_ptc:
+            self.geometry.copy(geo_ptc)
+
+        if not self.geometry.points():
+            orient_attrib: hou.Attrib = self.geometry.addAttrib(
+                hou.attribType.Point, 'orient', [0.0, 0.0, 0.0, 0.0])
+            scale_attrib: hou.Attrib = self.geometry.addAttrib(
+                hou.attribType.Point, 'scale', [1.0, 1.0, 1.0])
+            pscale_attrib: hou.Attrib = self.geometry.addAttrib(
+                hou.attribType.Point, 'pscale', 1.0)
+            id_attrib: hou.Attrib = self.geometry.addAttrib(
+                hou.attribType.Point, 'id', 0)
+            orient_attrib.setOption('type', 'quaternion')
+            scale_attrib.setOption('type', 'vector')
+            pscale_attrib.setOption('type', 'float')
+            id_attrib.setOption('type', 'int')
+        else:
+            self.point = self.geometry.iterPoints()[-1]
+    # end initGeometry
+        
+    def updateGeometryData(self) -> None:
+        """ Replace geometry data parm with geometry property. 
+        """
+        self.node.parm('geo_ptc').set(self.geometry)
+    # end updateGeometryData
+
+    def getLastPoint(self) -> int:
+        """ Get the last point and it's id from the geometry. 
+        """
+        if self.geometry and self.geometry.points():
+            self.point = self.geometry.iterPoints()[-1]
+            return self.point.attribValue('id')
+
+        return 0
+    # end getLastPoint
+    
+    def addPoint(self, position) -> None:
+        """ generate a point and assign id. 
+        """
+        last_id = self.getLastPoint()
+        self.point = self.geometry.createPoint()
+        self.point.setPosition(position)
+        self.point.setAttribValue('id', last_id + 1)
+        self.updateGeometryData()
+    # end addPoint
+
+    # def selectPoint(self, origin, direction) -> None:
+    #     """ select the nearest point from position.
+    #     """
+    #     prim_num, _ = self.geometryIntersection(origin, direction)
+    #     if prim_num < 0:
+    #         return
+    #     self.point = self.geometry.point(prim_num)
+    #     self.updateGeometryData()
+    # # end selectPoint
+
+    def setSelection(self, selection: hou.Selection) -> None:
+        selection_str = selection.selectionStrings()
+        if not selection_str:
+            return
+        self.selection = hou.Selection(
+            self.geometry, hou.geometryType.Points, selection_str[0])
+        selection_points = self.selection.points(self.geometry)
+        self.point = selection_points[-1]
+        self.updateGeometryData()
+    # end setSelection
+
+    def delete(self) -> None:
+        if not self.selection:
+            return
+        selected_pts = self.selection.points(self.geometry)
+        self.geometry.deletePoints(selected_pts)
+
+        self.selection.clear()
+        self.point = self.geometry.iterPoints()[-1]
+        self.updateGeometryData()
+    # end setSelection
+
+    def getPointTransform(self) -> tuple:
+        """ Extract Point Transform. 
+        """
+        position: hou.Vector3 = self.point.position()
+        orient: hou.Quaternion = hou.Quaternion(self.point.attribValue('orient'))
+        rot: hou.Vector3 = orient.extractEulerRotates()
+        scale: hou.Vector3 = hou.Vector3(self.point.attribValue('scale'))
+        uniformscale = self.point.attribValue('pscale')
+
+        return (position, rot, scale, uniformscale)
+    # end getPointTransform
+
+    def setPointTransform(self, handle_kwargs: dict) -> None:
+        """ Set Point Transform based on handle parms. 
+        """
+        parms = handle_kwargs['parms']
+        prev_parms = handle_kwargs['prev_parms']
+
+        if not self.selection:
+            return
+
+        trn_delta = hou.Vector3((parms['tx'], parms['ty'], parms['tz'])) - \
+            self.point.position()
+        rot_delta = hou.Vector3((parms['rx'], parms['ry'], parms['rz'])) - \
+            hou.Quaternion(self.point.attribValue('orient')).extractEulerRotates()
+        scale_delta = hou.Vector3((parms['sx'], parms['sy'], parms['sz'])) - \
+            hou.Vector3(self.point.attribValue('scale'))
+        pscale_delta = parms['uniform_scale'] - self.point.attribValue('pscale')
+
+        sel_points = self.selection.points(self.geometry)
+        for sel_point in sel_points:
+            sel_point.setPosition(sel_point.position() + trn_delta)
+            rot = hou.Quaternion(
+                sel_point.attribValue('orient')).extractEulerRotates()
+            orient = hou.Quaternion(hou.hmath.buildRotate(rot + rot_delta))
+            sel_point.setAttribValue('orient', orient)
+            scale = hou.Vector3(sel_point.attribValue('scale'))
+            sel_point.setAttribValue('scale', scale + scale_delta)
+            pscale = sel_point.attribValue('pscale')
+            sel_point.setAttribValue('pscale', pscale + pscale_delta)
+
+        self.updateGeometryData()
+    # end setPointTransform
+
+    def geometryIntersection(self, ray_origin, ray_dir) -> tuple:
+        """ Make objects for the intersect() method to modify. """
+        position = hou.Vector3()
+        normal = hou.Vector3()
+        uvw = hou.Vector3()
+        bbox_geo = self.node.node('OUT_bbox').geometry()
+        intersected = bbox_geo.intersect(
+            ray_origin, ray_dir, position, normal, uvw
+        )
+        return (intersected, position)
+    # end geometryIntersection
+# end GeometryParm
+
+
+class Mode(Enum):
+    Create = 1
+    Edit = 2
+# end Mode
 
 
 class State:
@@ -18,8 +174,9 @@ class State:
         self.state_name = state_name
         self.scene_viewer = scene_viewer
 
+        self.mode = Mode.Create
         self.node: hou.Node = None
-        self.gd: ng.GeometryData = None
+        self.gp: GeometryParm = None
         self.pressed = False
 
         self.xform_handle = hou.Handle(scene_viewer, 'xform_handle')
@@ -31,7 +188,7 @@ class State:
         if not self.node:
             raise
         
-        self.gd = ng.GeometryData(self.node)
+        self.gp = GeometryParm(self.node)
         self.scene_viewer.setPromptMessage(State.MSG)
     # end onEnter
 
@@ -51,10 +208,15 @@ class State:
         state_parms = kwargs['state_parms']
     # end onExit
 
-    def start(self, position) -> None:
+    def start(self, origin, direction) -> None:
         if not self.pressed:
             self.scene_viewer.beginStateUndo('Add point')
-            self.gd.genPointcloud(position)
+            if self.mode == Mode.Create:
+                position = su.cplaneIntersection(self.scene_viewer, origin, direction)
+                self.gp.addPoint(position)
+            elif self.mode == Mode.Edit:
+                self.scene_viewer.triggerStateSelector(
+                    hou.triggerSelectorAction.Start, name='selector_inst')
 
         self.pressed = True
     # end start
@@ -73,18 +235,12 @@ class State:
         device = ui_event.device()
         origin, direction = ui_event.ray()
         
-        position = su.cplaneIntersection(self.scene_viewer, origin, direction)
-           
-        # Create/move point if LMB is down
         if device.isLeftButton():
-            if device.isCtrlKey():
-                print('ctrl')
-            else:
-                self.start(position)
+            self.start(origin, direction)
         else:
             self.finish()
-            
-        return True
+                
+        return False
     # end onMouseEvent
 
     def onMouseWheelEvent(self, kwargs) -> bool:
@@ -96,10 +252,23 @@ class State:
         # Must return True to consume the event
         return False
     
-    def onBeginHandleToState(self, kwargs) -> None:
-        handle_name = kwargs["handle"]
-        ui_event = kwargs["ui_event"]
-    # end onBeginHandleToState
+    def onKeyEvent(self, kwargs) -> bool:
+        """ Find the position of the point to add by 
+            intersecting the construction plane. 
+        """
+        ui_event = kwargs['ui_event']
+        device = ui_event.device()
+        
+        if device.keyString() == 'f':
+            self.mode = Mode.Create
+        elif device.keyString() == 'g':
+            self.mode = Mode.Edit
+        elif device.keyString() == 'Del':
+            self.gp.delete()
+            return True
+
+        return False
+    # end onKeyEvent
 
     def onHandleToState(self, kwargs) -> None:
         """ Called when the user manipulates a handle.
@@ -108,11 +277,10 @@ class State:
         parms = kwargs['parms']
         prev_parms = kwargs['prev_parms']
 
-        last_pt, _ = self.gd.getLastPoint()
-        if not last_pt:
+        if not self.gp.point:
             return
-
-        self.gd.setPointTransform(parms, last_pt)
+        
+        self.gp.setPointTransform(kwargs)
     # end onHandleToState
 
     def onStateToHandle(self, kwargs) -> None:
@@ -121,19 +289,24 @@ class State:
         """
         parms = kwargs["parms"]
 
-        last_pt, _ = self.getLastPoint()
-        if not last_pt:
+        if not self.gp.point:
             return
         
-        pos, rot, scale, uniformscale = self.gd.getPointTransform(last_pt)
+        pos, rot, scale, uniformscale = self.gp.getPointTransform()
         parms['tx'], parms['ty'], parms['tz'] = pos.x(), pos.y(), pos.z()
         parms['rx'], parms['ry'], parms['rz'] = rot.x(), rot.y(), rot.z()
         parms['sx'], parms['sy'], parms['sz'] = scale.x(), scale.y(), scale.z()
         parms['uniform_scale'] = uniformscale
     # end onStateToHandle
 
-    def onEndHandleToState(self, kwargs) -> None:
-        handle_name = kwargs["handle"]
-        ui_event = kwargs["ui_event"]
-    # end onEndHandleToState
+    def onSelection(self, kwargs) -> bool:
+        """ Called when a selector has selected something
+        """
+        selection = kwargs["selection"]
+        state_parms = kwargs["state_parms"]
+
+        self.gp.setSelection(selection)
+
+        return False
+    # end onSelection
 # end State
