@@ -15,7 +15,6 @@ class GeometryParm:
     def __init__(self, node) -> None:
         self.node: hou.Node = node
         self.geometry: hou.Geometry = hou.Geometry()
-        self.point: hou.Point = None
         self.selection: hou.Selection = None
 
         self.initGeometry()
@@ -28,7 +27,8 @@ class GeometryParm:
         if geo_ptc:
             self.geometry.copy(geo_ptc)
 
-        if not self.geometry.points():
+        points = self.geometry.iterPoints()
+        if not len(points):
             orient_attrib: hou.Attrib = self.geometry.addAttrib(
                 hou.attribType.Point, 'orient', [0.0, 0.0, 0.0, 0.0])
             scale_attrib: hou.Attrib = self.geometry.addAttrib(
@@ -42,7 +42,7 @@ class GeometryParm:
             pscale_attrib.setOption('type', 'float')
             id_attrib.setOption('type', 'int')
         else:
-            self.point = self.geometry.iterPoints()[-1]
+            self.selection = hou.Selection((points[-1],))
     # end initGeometry
         
     def updateGeometryData(self) -> None:
@@ -51,23 +51,26 @@ class GeometryParm:
         self.node.parm('geo_ptc').set(self.geometry)
     # end updateGeometryData
 
-    def getLastPoint(self) -> int:
+    def getLastPoint(self) -> tuple[hou.Point, int]:
         """ Get the last point and it's id from the geometry. 
         """
-        if self.geometry and self.geometry.points():
-            self.point = self.geometry.iterPoints()[-1]
-            return self.point.attribValue('id')
+        points = self.geometry.iterPoints()
+        if not len(points):
+            return (None, 0)
 
-        return 0
+        last_pt = points[-1]
+        return (last_pt, last_pt.attribValue('id'))
     # end getLastPoint
     
     def addPoint(self, position) -> None:
         """ generate a point and assign id. 
         """
-        last_id = self.getLastPoint()
-        self.point = self.geometry.createPoint()
-        self.point.setPosition(position)
-        self.point.setAttribValue('id', last_id + 1)
+        _, last_id = self.getLastPoint()
+        last_pt = self.geometry.createPoint()
+        last_pt.setPosition(position)
+        last_pt.setAttribValue('id', last_id + 1)
+
+        self.selection = hou.Selection((last_pt,))
         self.updateGeometryData()
     # end addPoint
 
@@ -77,42 +80,49 @@ class GeometryParm:
     #     prim_num, _ = self.geometryIntersection(origin, direction)
     #     if prim_num < 0:
     #         return
-    #     self.point = self.geometry.point(prim_num)
     #     self.updateGeometryData()
     # # end selectPoint
 
-    def setSelection(self, selection: hou.Selection) -> None:
+    def setSelection(self, selection: hou.GeometrySelection) -> None:
         selection_str = selection.selectionStrings()
         if not selection_str:
             return
+
         self.selection = hou.Selection(
             self.geometry, hou.geometryType.Points, selection_str[0])
-        selection_points = self.selection.points(self.geometry)
-        self.point = selection_points[-1]
+
         self.updateGeometryData()
     # end setSelection
 
     def delete(self) -> None:
-        if not self.selection:
+        sel_points = self.selection.points(self.geometry)
+        if not sel_points:
             return
-        selected_pts = self.selection.points(self.geometry)
-        self.geometry.deletePoints(selected_pts)
 
+        self.geometry.deletePoints(sel_points)
         self.selection.clear()
-        self.point = self.geometry.iterPoints()[-1]
+        last_pt, _ = self.getLastPoint()
+        if last_pt:
+            self.selection = hou.Selection((last_pt,))
+
         self.updateGeometryData()
-    # end setSelection
+    # end delete
 
     def getPointTransform(self) -> tuple:
         """ Extract Point Transform. 
         """
-        position: hou.Vector3 = self.point.position()
-        orient: hou.Quaternion = hou.Quaternion(self.point.attribValue('orient'))
-        rot: hou.Vector3 = orient.extractEulerRotates()
-        scale: hou.Vector3 = hou.Vector3(self.point.attribValue('scale'))
-        uniformscale = self.point.attribValue('pscale')
+        sel_points = self.selection.points(self.geometry)
+        if not sel_points:
+            return (hou.Vector3(), hou.Vector3(), hou.Vector3(), 0.0)
 
-        return (position, rot, scale, uniformscale)
+        last_pt = sel_points[-1]
+        position = last_pt.position()
+        rotation: hou.Vector3 = hou.Quaternion(
+            last_pt.attribValue('orient')).extractEulerRotates()
+        scale = hou.Vector3(last_pt.attribValue('scale'))
+        uniformscale = last_pt.attribValue('pscale')
+
+        return (position, rotation, scale, uniformscale)
     # end getPointTransform
 
     def setPointTransform(self, handle_kwargs: dict) -> None:
@@ -121,18 +131,19 @@ class GeometryParm:
         parms = handle_kwargs['parms']
         prev_parms = handle_kwargs['prev_parms']
 
-        if not self.selection:
-            return
-
-        trn_delta = hou.Vector3((parms['tx'], parms['ty'], parms['tz'])) - \
-            self.point.position()
-        rot_delta = hou.Vector3((parms['rx'], parms['ry'], parms['rz'])) - \
-            hou.Quaternion(self.point.attribValue('orient')).extractEulerRotates()
-        scale_delta = hou.Vector3((parms['sx'], parms['sy'], parms['sz'])) - \
-            hou.Vector3(self.point.attribValue('scale'))
-        pscale_delta = parms['uniform_scale'] - self.point.attribValue('pscale')
-
         sel_points = self.selection.points(self.geometry)
+        if not sel_points:
+            return
+        
+        last_pt = sel_points[-1]
+        trn_delta = hou.Vector3((parms['tx'], parms['ty'], parms['tz'])) - \
+            last_pt.position()
+        rot_delta = hou.Vector3((parms['rx'], parms['ry'], parms['rz'])) - \
+            hou.Quaternion(last_pt.attribValue('orient')).extractEulerRotates()
+        scale_delta = hou.Vector3((parms['sx'], parms['sy'], parms['sz'])) - \
+            hou.Vector3(last_pt.attribValue('scale'))
+        pscale_delta = parms['uniform_scale'] - last_pt.attribValue('pscale')
+
         for sel_point in sel_points:
             sel_point.setPosition(sel_point.position() + trn_delta)
             rot = hou.Quaternion(
@@ -277,9 +288,6 @@ class State:
         parms = kwargs['parms']
         prev_parms = kwargs['prev_parms']
 
-        if not self.gp.point:
-            return
-        
         self.gp.setPointTransform(kwargs)
     # end onHandleToState
 
@@ -288,9 +296,6 @@ class State:
             so you can update dynamic handles if necessary
         """
         parms = kwargs["parms"]
-
-        if not self.gp.point:
-            return
         
         pos, rot, scale, uniformscale = self.gp.getPointTransform()
         parms['tx'], parms['ty'], parms['tz'] = pos.x(), pos.y(), pos.z()
