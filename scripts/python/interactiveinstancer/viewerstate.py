@@ -84,7 +84,8 @@ class GeometryParm:
     # # end selectPoint
 
     def setSelection(self, selection: hou.GeometrySelection) -> None:
-        selection_str = selection.selectionStrings()
+        selection_str = selection.selectionStrings(
+            empty_string_selects_all=False)
         if not selection_str:
             return
 
@@ -134,21 +135,28 @@ class GeometryParm:
         sel_points = self.selection.points(self.geometry)
         if not sel_points:
             return
-        
+
         last_pt = sel_points[-1]
         trn_delta = hou.Vector3((parms['tx'], parms['ty'], parms['tz'])) - \
             last_pt.position()
-        rot_delta = hou.Vector3((parms['rx'], parms['ry'], parms['rz'])) - \
-            hou.Quaternion(last_pt.attribValue('orient')).extractEulerRotates()
+        inv_mtx: hou.Matrix3 = hou.Quaternion(
+            last_pt.attribValue('orient')).extractRotationMatrix3().inverted()
+        delta_mtx: hou.Matrix3 = hou.hmath.buildRotate(
+            parms['rx'], parms['ry'], parms['rz']).extractRotationMatrix3()
+        delta_mtx *= inv_mtx
         scale_delta = hou.Vector3((parms['sx'], parms['sy'], parms['sz'])) - \
             hou.Vector3(last_pt.attribValue('scale'))
         pscale_delta = parms['uniform_scale'] - last_pt.attribValue('pscale')
 
+        tmp_mtx: hou.Matrix3 = hou.Matrix3()
         for sel_point in sel_points:
             sel_point.setPosition(sel_point.position() + trn_delta)
-            rot = hou.Quaternion(
-                sel_point.attribValue('orient')).extractEulerRotates()
-            orient = hou.Quaternion(hou.hmath.buildRotate(rot + rot_delta))
+            rot_mtx: hou.Matrix3 = hou.Quaternion(
+                sel_point.attribValue('orient')).extractRotationMatrix3()
+            tmp_mtx.setToIdentity()
+            tmp_mtx *= delta_mtx
+            tmp_mtx *= rot_mtx
+            orient = hou.Quaternion(tmp_mtx)
             sel_point.setAttribValue('orient', orient)
             scale = hou.Vector3(sel_point.attribValue('scale'))
             sel_point.setAttribValue('scale', scale + scale_delta)
