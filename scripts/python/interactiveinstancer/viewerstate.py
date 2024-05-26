@@ -8,7 +8,17 @@ Date Created:   May 12, 2024 - 23:43:07
 
 import hou
 import viewerstate.utils as su
+import viewerhandle.utils as hu
 from enum import Enum
+from dataclasses import dataclass
+
+
+@dataclass
+class XformInfo:
+    position: hou.Vector3 = hou.Vector3()
+    rotation: hou.Vector3 = hou.Vector3()
+    scale: hou.Vector3 = hou.Vector3(1.0, 1.0, 1.0)
+    uniform_scale: float = 1.0
 
 
 class GeometryParm:
@@ -19,7 +29,7 @@ class GeometryParm:
 
         self.initGeometry()
     # end __init__
-        
+
     def initGeometry(self) -> None:
         geo_ptc_parm: hou.Parm = self.node.parm('geo_ptc')
         geo_ptc: hou.Geometry = geo_ptc_parm.evalAsGeometry()
@@ -28,7 +38,7 @@ class GeometryParm:
             self.geometry.copy(geo_ptc)
 
         points = self.geometry.iterPoints()
-        if not len(points):
+        if not points:
             orient_attrib: hou.Attrib = self.geometry.addAttrib(
                 hou.attribType.Point, 'orient', [0.0, 0.0, 0.0, 0.0])
             scale_attrib: hou.Attrib = self.geometry.addAttrib(
@@ -41,10 +51,8 @@ class GeometryParm:
             scale_attrib.setOption('type', 'vector')
             pscale_attrib.setOption('type', 'float')
             id_attrib.setOption('type', 'int')
-        else:
-            self.selection = hou.Selection((points[-1],))
     # end initGeometry
-        
+
     def updateGeometryData(self) -> None:
         """ Replace geometry data parm with geometry property. 
         """
@@ -55,19 +63,19 @@ class GeometryParm:
         """ Get the last point and it's id from the geometry. 
         """
         points = self.geometry.iterPoints()
-        if not len(points):
+        if not points:
             return (None, 0)
 
         last_pt = points[-1]
         return (last_pt, last_pt.attribValue('id'))
     # end getLastPoint
     
-    def addPoint(self, position) -> None:
+    def addPoint(self, xform_info: XformInfo) -> None:
         """ generate a point and assign id. 
         """
         _, last_id = self.getLastPoint()
         last_pt = self.geometry.createPoint()
-        last_pt.setPosition(position)
+        last_pt.setPosition(xform_info.position)
         last_pt.setAttribValue('id', last_id + 1)
 
         self.selection = hou.Selection((last_pt,))
@@ -83,85 +91,86 @@ class GeometryParm:
     #     self.updateGeometryData()
     # # end selectPoint
 
+    def getSelection(self) -> tuple[hou.Point]:
+        if not self.selection:
+            return None
+        return self.selection.points(self.geometry)
+    # end getSelection
+
     def setSelection(self, selection: hou.GeometrySelection) -> None:
         selection_str = selection.selectionStrings(
             empty_string_selects_all=False)
-        if not selection_str:
-            return
-
-        self.selection = hou.Selection(
-            self.geometry, hou.geometryType.Points, selection_str[0])
+        if selection_str:
+            self.selection = hou.Selection(
+                self.geometry, hou.geometryType.Points, selection_str[0])
+        else:
+            self.selection = None
 
         self.updateGeometryData()
     # end setSelection
 
     def delete(self) -> None:
-        sel_points = self.selection.points(self.geometry)
-        if not sel_points:
+        points = self.getSelection()
+        if not points:
             return
 
-        self.geometry.deletePoints(sel_points)
-        self.selection.clear()
-        last_pt, _ = self.getLastPoint()
-        if last_pt:
-            self.selection = hou.Selection((last_pt,))
+        self.geometry.deletePoints(points)
+        self.selection = None
 
         self.updateGeometryData()
     # end delete
 
-    def getPointTransform(self) -> tuple:
+    def getPointTransform(self) -> XformInfo:
         """ Extract Point Transform. 
         """
-        sel_points = self.selection.points(self.geometry)
-        if not sel_points:
-            return (hou.Vector3(), hou.Vector3(), hou.Vector3(), 0.0)
+        xform_info = XformInfo()
+        points = self.getSelection()
+        if not points:
+            return xform_info
 
-        last_pt = sel_points[-1]
-        position = last_pt.position()
-        rotation: hou.Vector3 = hou.Quaternion(
+        last_pt = points[-1]
+        xform_info.position = last_pt.position()
+        xform_info.rotation = hou.Quaternion(
             last_pt.attribValue('orient')).extractEulerRotates()
-        scale = hou.Vector3(last_pt.attribValue('scale'))
-        uniformscale = last_pt.attribValue('pscale')
+        xform_info.scale = hou.Vector3(last_pt.attribValue('scale'))
+        xform_info.uniform_scale = last_pt.attribValue('pscale')
 
-        return (position, rotation, scale, uniformscale)
+        return xform_info
     # end getPointTransform
 
-    def setPointTransform(self, handle_kwargs: dict) -> None:
+    def setPointTransform(self, xform_info: XformInfo) -> None:
         """ Set Point Transform based on handle parms. 
         """
-        parms = handle_kwargs['parms']
-        prev_parms = handle_kwargs['prev_parms']
-
-        sel_points = self.selection.points(self.geometry)
-        if not sel_points:
+        points = self.getSelection()
+        if not points:
             return
 
-        last_pt = sel_points[-1]
-        trn_delta = hou.Vector3((parms['tx'], parms['ty'], parms['tz'])) - \
-            last_pt.position()
-        inv_mtx: hou.Matrix3 = hou.Quaternion(
+        delta_info = XformInfo()
+        last_pt = points[-1]
+        delta_info.position =  xform_info.position - last_pt.position()
+        delta_mtx: hou.Matrix3= hou.hmath.buildRotate(
+            xform_info.rotation).extractRotationMatrix3()
+        delta_mtx *= hou.Quaternion(
             last_pt.attribValue('orient')).extractRotationMatrix3().inverted()
-        delta_mtx: hou.Matrix3 = hou.hmath.buildRotate(
-            parms['rx'], parms['ry'], parms['rz']).extractRotationMatrix3()
-        delta_mtx *= inv_mtx
-        scale_delta = hou.Vector3((parms['sx'], parms['sy'], parms['sz'])) - \
+        delta_info.scale = xform_info.scale - \
             hou.Vector3(last_pt.attribValue('scale'))
-        pscale_delta = parms['uniform_scale'] - last_pt.attribValue('pscale')
+        delta_info.uniform_scale = xform_info.uniform_scale - \
+            last_pt.attribValue('pscale')
 
         tmp_mtx: hou.Matrix3 = hou.Matrix3()
-        for sel_point in sel_points:
-            sel_point.setPosition(sel_point.position() + trn_delta)
+        for point in points:
+            point.setPosition(point.position() + delta_info.position)
             rot_mtx: hou.Matrix3 = hou.Quaternion(
-                sel_point.attribValue('orient')).extractRotationMatrix3()
+                point.attribValue('orient')).extractRotationMatrix3()
             tmp_mtx.setToIdentity()
             tmp_mtx *= delta_mtx
             tmp_mtx *= rot_mtx
             orient = hou.Quaternion(tmp_mtx)
-            sel_point.setAttribValue('orient', orient)
-            scale = hou.Vector3(sel_point.attribValue('scale'))
-            sel_point.setAttribValue('scale', scale + scale_delta)
-            pscale = sel_point.attribValue('pscale')
-            sel_point.setAttribValue('pscale', pscale + pscale_delta)
+            point.setAttribValue('orient', orient)
+            scale = hou.Vector3(point.attribValue('scale'))
+            point.setAttribValue('scale', scale + delta_info.scale)
+            pscale = point.attribValue('pscale')
+            point.setAttribValue('pscale', pscale + delta_info.uniform_scale)
 
         self.updateGeometryData()
     # end setPointTransform
@@ -177,23 +186,29 @@ class GeometryParm:
         )
         return (intersected, position)
     # end geometryIntersection
+
+    def isThirdInputValid(self) -> bool:
+        input_geo = self.node.node('IN_geo').geometry()
+        return input_geo.containsPrimType(hou.primType.Polygon)
+    # end isThirdInputValid
 # end GeometryParm
 
 
 class Mode(Enum):
-    Create = 1
-    Edit = 2
+    SingleCreate = 1
+    BrushCreate = 2
+    Edit = 3
 # end Mode
 
 
 class State:
-    MSG = 'LMB to add points to the construction plane.'
+    MSG = 'Add an instance.'
 
     def __init__(self, state_name, scene_viewer) -> None:
         self.state_name = state_name
-        self.scene_viewer = scene_viewer
+        self.scene_viewer: hou.SceneViewer = scene_viewer
 
-        self.mode = Mode.Create
+        self.mode = Mode.SingleCreate
         self.node: hou.Node = None
         self.gp: GeometryParm = None
         self.pressed = False
@@ -227,15 +242,17 @@ class State:
         state_parms = kwargs['state_parms']
     # end onExit
 
-    def start(self, origin, direction) -> None:
+    def start(self, xform_info: XformInfo) -> None:
         if not self.pressed:
-            self.scene_viewer.beginStateUndo('Add point')
-            if self.mode == Mode.Create:
-                position = su.cplaneIntersection(self.scene_viewer, origin, direction)
-                self.gp.addPoint(position)
+            self.scene_viewer.beginStateUndo('add')
+            if self.mode == Mode.SingleCreate:
+                self.gp.addPoint(xform_info)
+            elif self.mode == Mode.BrushCreate:
+                # TODO 
+                pass
             elif self.mode == Mode.Edit:
-                self.scene_viewer.triggerStateSelector(
-                    hou.triggerSelectorAction.Start, name='selector_inst')
+                # TODO 
+                pass
 
         self.pressed = True
     # end start
@@ -250,16 +267,32 @@ class State:
         """ Find the position of the point to add by 
             intersecting the construction plane. 
         """
-        ui_event = kwargs['ui_event']
-        device = ui_event.device()
-        origin, direction = ui_event.ray()
+        ui_event: hou.ViewerEvent = kwargs['ui_event']
+        reason: hou.uiEventReason = ui_event.reason()
+        device: hou.UIEventDevice = ui_event.device()
+        consumed = False
         
         if device.isLeftButton():
-            self.start(origin, direction)
+            consumed = False
+            origin, direction = ui_event.ray()
+
+            xform_info = XformInfo()
+            succeed = self.gp.isThirdInputValid()
+            if succeed:
+                # TODO find the intersection on the thrid input
+                pass
+            else:
+                xform_info.position = su.cplaneIntersection(
+                    self.scene_viewer, origin, direction)
+
+            self.start(xform_info)
+            if self.mode == Mode.SingleCreate and \
+                reason == hou.uiEventReason.Active:
+                self.gp.setPointTransform(xform_info)
         else:
             self.finish()
                 
-        return False
+        return consumed
     # end onMouseEvent
 
     def onMouseWheelEvent(self, kwargs) -> bool:
@@ -275,19 +308,74 @@ class State:
         """ Find the position of the point to add by 
             intersecting the construction plane. 
         """
-        ui_event = kwargs['ui_event']
+        ui_event: hou.ViewerEvent = kwargs['ui_event']
         device = ui_event.device()
+        consumed = False
         
         if device.keyString() == 'f':
-            self.mode = Mode.Create
+            State.MSG = 'Add an instance.'
+            self.scene_viewer.triggerStateSelector(
+                    hou.triggerSelectorAction.Stop, name='selector_inst')
+            self.mode = Mode.SingleCreate
+            consumed = True
+        elif device.keyString() == 'b':
+            State.MSG = 'Paint instances base on the brush settings.'
+            self.scene_viewer.triggerStateSelector(
+                    hou.triggerSelectorAction.Stop, name='selector_inst')
+            consumed = True
         elif device.keyString() == 'g':
+            State.MSG = 'Select instance(s) to edit.'
+            self.scene_viewer.triggerStateSelector(
+                    hou.triggerSelectorAction.Start, name='selector_inst')
             self.mode = Mode.Edit
+            consumed = True
         elif device.keyString() == 'Del':
             self.gp.delete()
-            return True
+            self.scene_viewer.curViewport().draw()
+            consumed = True
 
-        return False
+        self.scene_viewer.setPromptMessage(State.MSG)
+        return consumed
     # end onKeyEvent
+
+    def onParmChangeEvent(self, kwargs) -> None:
+        pass
+    # end onParmChangeEvent
+
+    def onBeginHandleToState(self, kwargs) -> None:
+        handle_name = kwargs['handle']
+        ui_event = kwargs['ui_event']
+        
+        self.scene_viewer.beginStateUndo('editing')
+    # end onBeginHandleToState
+
+    def onStateToHandle(self, kwargs) -> None:
+        """ Called when the user changes parameter(s), 
+            so you can update dynamic handles if necessary
+        """
+        parms = kwargs['parms']
+
+        if not self.gp.selection:
+            self.xform_handle.show(False)
+            self.xform_handle.update()
+            return
+
+        self.xform_handle.show(True)
+
+        xform_info = self.gp.getPointTransform()
+        parms['px'] = xform_info.position.x()
+        parms['py'] = xform_info.position.y()
+        parms['pz'] = xform_info.position.z()
+        parms['pivot_rx'] = xform_info.rotation.x()
+        parms['pivot_ry'] = xform_info.rotation.y()
+        parms['pivot_rz'] = xform_info.rotation.z()
+        parms['sx'] = xform_info.scale.x()
+        parms['sy'] = xform_info.scale.y()
+        parms['sz'] = xform_info.scale.z()
+        parms['uniform_scale'] = xform_info.uniform_scale
+
+        self.xform_handle.update()
+    # end onStateToHandle
 
     def onHandleToState(self, kwargs) -> None:
         """ Called when the user manipulates a handle.
@@ -296,21 +384,24 @@ class State:
         parms = kwargs['parms']
         prev_parms = kwargs['prev_parms']
 
-        self.gp.setPointTransform(kwargs)
+        xform_info = XformInfo()
+        xform_info.position = hou.Vector3(
+            (parms['tx'], parms['ty'], parms['tz']))
+        xform_info.rotation = hou.Vector3(
+            (parms['rx'], parms['ry'], parms['rz']))
+        xform_info.scale = hou.Vector3(
+            (parms['sx'], parms['sy'], parms['sz'])) 
+        xform_info.uniform_scale = parms['uniform_scale']
+
+        self.gp.setPointTransform(xform_info)
     # end onHandleToState
 
-    def onStateToHandle(self, kwargs) -> None:
-        """ Called when the user changes parameter(s), 
-            so you can update dynamic handles if necessary
-        """
-        parms = kwargs["parms"]
-        
-        pos, rot, scale, uniformscale = self.gp.getPointTransform()
-        parms['tx'], parms['ty'], parms['tz'] = pos.x(), pos.y(), pos.z()
-        parms['rx'], parms['ry'], parms['rz'] = rot.x(), rot.y(), rot.z()
-        parms['sx'], parms['sy'], parms['sz'] = scale.x(), scale.y(), scale.z()
-        parms['uniform_scale'] = uniformscale
-    # end onStateToHandle
+    def onEndHandleToState(self, kwargs) -> None:
+        handle_name = kwargs['handle']
+        ui_event = kwargs['ui_event']
+
+        self.scene_viewer.endStateUndo()
+    # end onEndHandleToState
 
     def onSelection(self, kwargs) -> bool:
         """ Called when a selector has selected something
@@ -319,7 +410,15 @@ class State:
         state_parms = kwargs["state_parms"]
 
         self.gp.setSelection(selection)
+        self.setHandleVisibility()
 
         return False
     # end onSelection
+
+    def setHandleVisibility(self) -> bool:
+        visiblity = True if self.gp.selection else False
+        self.xform_handle.show(visiblity)
+        self.xform_handle.update()
+        return visiblity
+    # end setHandleVisibility
 # end State
