@@ -20,11 +20,19 @@ class XformInfo:
     scale: hou.Vector3 = hou.Vector3(1.0, 1.0, 1.0)
     uniform_scale: float = 1.0
 
+@dataclass
+class RayInfo:
+    hitprim: int = -1
+    hitpos: hou.Vector3 = hou.Vector3()
+    hitnormal: hou.Vector3 = hou.Vector3()
+    hituvw: hou.Vector3 = hou.Vector3()
+
 
 class GeometryParm:
     def __init__(self, node) -> None:
         self.node: hou.Node = node
         self.geometry: hou.Geometry = hou.Geometry()
+        self.ray_geo: hou.Geometry = hou.Geometry()
         self.selection: hou.Selection = None
 
         self.initGeometry()
@@ -51,6 +59,8 @@ class GeometryParm:
             scale_attrib.setOption('type', 'vector')
             pscale_attrib.setOption('type', 'float')
             id_attrib.setOption('type', 'int')
+
+        self.isInputGeometryValid()
     # end initGeometry
 
     def updateGeometryData(self) -> None:
@@ -81,15 +91,6 @@ class GeometryParm:
         self.selection = hou.Selection((last_pt,))
         self.updateGeometryData()
     # end addPoint
-
-    # def selectPoint(self, origin, direction) -> None:
-    #     """ select the nearest point from position.
-    #     """
-    #     prim_num, _ = self.geometryIntersection(origin, direction)
-    #     if prim_num < 0:
-    #         return
-    #     self.updateGeometryData()
-    # # end selectPoint
 
     def getSelection(self) -> tuple[hou.Point]:
         if not self.selection:
@@ -175,22 +176,26 @@ class GeometryParm:
         self.updateGeometryData()
     # end setPointTransform
 
-    def geometryIntersection(self, ray_origin, ray_dir) -> tuple:
-        """ Make objects for the intersect() method to modify. """
-        position = hou.Vector3()
-        normal = hou.Vector3()
-        uvw = hou.Vector3()
-        bbox_geo = self.node.node('OUT_bbox').geometry()
-        intersected = bbox_geo.intersect(
-            ray_origin, ray_dir, position, normal, uvw
-        )
-        return (intersected, position)
-    # end geometryIntersection
+    def isInputGeometryValid(self) -> bool:
+        input_geo: hou.Geometry = self.node.node('IN_geo').geometry()
+        contain_polygon =  input_geo.containsPrimType(hou.primType.Polygon)
+        if contain_polygon and input_geo.iterPrims():
+            self.ray_geo.copy(input_geo)
+            return True
+            
+        self.ray_geo.clear()            
+        return False
+    # end isInputGeometryValid
 
-    def isThirdInputValid(self) -> bool:
-        input_geo = self.node.node('IN_geo').geometry()
-        return input_geo.containsPrimType(hou.primType.Polygon)
-    # end isThirdInputValid
+    def intersect(self, ray_origin, ray_dir) -> RayInfo:
+        """ Make objects for the intersect() method to modify. """
+        ray_info = RayInfo()
+        ray_info.hitprim = self.ray_geo.intersect(
+            ray_origin, ray_dir, 
+            ray_info.hitpos, ray_info.hitnormal, ray_info.hituvw
+        )
+        return ray_info
+    # end intersect
 # end GeometryParm
 
 
@@ -227,12 +232,11 @@ class State:
     # end onEnter
 
     def onInterrupt(self, kwargs) -> None:
-        self.xform_handle.show(False)
         self.finish()
     # end onInterrupt
 
     def onResume(self, kwargs) -> None:
-        self.xform_handle.show(True)
+        self.gp.isInputGeometryValid()
         self.scene_viewer.setPromptMessage(State.MSG)
     # end onResume
 
@@ -273,20 +277,21 @@ class State:
         consumed = False
         
         if device.isLeftButton():
-            consumed = False
-            origin, direction = ui_event.ray()
+            ray_origin, ray_dir = ui_event.ray()
 
             xform_info = XformInfo()
-            succeed = self.gp.isThirdInputValid()
+            succeed = self.gp.isInputGeometryValid()
             if succeed:
-                # TODO find the intersection on the thrid input
-                pass
+                ray_info: RayInfo = self.gp.intersect(ray_origin, ray_dir)
+                if ray_info.hitprim < 0:
+                    return consumed
+                xform_info.position = ray_info.hitpos
             else:
                 xform_info.position = su.cplaneIntersection(
-                    self.scene_viewer, origin, direction)
+                    self.scene_viewer, ray_origin, ray_dir)
 
             self.start(xform_info)
-            if self.mode == Mode.SingleCreate and \
+            if self.mode != Mode.BrushCreate and \
                 reason == hou.uiEventReason.Active:
                 self.gp.setPointTransform(xform_info)
         else:
@@ -311,7 +316,7 @@ class State:
         ui_event: hou.ViewerEvent = kwargs['ui_event']
         device = ui_event.device()
         consumed = False
-        
+
         if device.keyString() == 'f':
             State.MSG = 'Add an instance.'
             self.scene_viewer.triggerStateSelector(
@@ -338,14 +343,11 @@ class State:
         return consumed
     # end onKeyEvent
 
-    def onParmChangeEvent(self, kwargs) -> None:
-        pass
-    # end onParmChangeEvent
-
     def onBeginHandleToState(self, kwargs) -> None:
         handle_name = kwargs['handle']
         ui_event = kwargs['ui_event']
         
+        self.scene_viewer
         self.scene_viewer.beginStateUndo('editing')
     # end onBeginHandleToState
 
@@ -355,6 +357,8 @@ class State:
         """
         parms = kwargs['parms']
 
+        self.log(kwargs)
+
         if not self.gp.selection:
             self.xform_handle.show(False)
             self.xform_handle.update()
@@ -363,12 +367,12 @@ class State:
         self.xform_handle.show(True)
 
         xform_info = self.gp.getPointTransform()
-        parms['px'] = xform_info.position.x()
-        parms['py'] = xform_info.position.y()
-        parms['pz'] = xform_info.position.z()
-        parms['pivot_rx'] = xform_info.rotation.x()
-        parms['pivot_ry'] = xform_info.rotation.y()
-        parms['pivot_rz'] = xform_info.rotation.z()
+        parms['tx'] = xform_info.position.x()
+        parms['ty'] = xform_info.position.y()
+        parms['tz'] = xform_info.position.z()
+        parms['rx'] = xform_info.rotation.x()
+        parms['ry'] = xform_info.rotation.y()
+        parms['rz'] = xform_info.rotation.z()
         parms['sx'] = xform_info.scale.x()
         parms['sy'] = xform_info.scale.y()
         parms['sz'] = xform_info.scale.z()
@@ -383,6 +387,7 @@ class State:
         handle_name = kwargs['handle']
         parms = kwargs['parms']
         prev_parms = kwargs['prev_parms']
+        ui_event: hou.UIEvent = kwargs['ui_event']
 
         xform_info = XformInfo()
         xform_info.position = hou.Vector3(
