@@ -27,6 +27,17 @@ class RayInfo:
     hitnormal: hou.Vector3 = hou.Vector3()
     hituvw: hou.Vector3 = hou.Vector3()
 
+@dataclass
+class PrimUV:
+    prim: hou.Prim = None
+    u: float = 0.0
+    v: float = 0.0
+    dist: float = 0.0
+
+    @classmethod
+    def from_tuple(cls, data):
+        return cls(data[0], data[1], data[2], data[3])
+
 
 class GeometryParm:
     def __init__(self, node) -> None:
@@ -60,7 +71,7 @@ class GeometryParm:
             pscale_attrib.setOption('type', 'float')
             id_attrib.setOption('type', 'int')
 
-        self.isInputGeometryValid()
+        self.isGuideValid()
     # end initGeometry
 
     def updateGeometryData(self) -> None:
@@ -139,6 +150,41 @@ class GeometryParm:
         return xform_info
     # end getPointTransform
 
+    def isGuideValid(self) -> bool:
+        input_geo: hou.Geometry = self.node.node('GUIDE').geometry()
+        contain_polygon =  input_geo.containsPrimType(hou.primType.Polygon)
+        if contain_polygon and input_geo.iterPrims():
+            self.ray_geo.copy(input_geo)
+            return True
+            
+        self.ray_geo.clear()            
+        return False
+    # end isGuideValid
+
+    def intersect(self, ray_origin, ray_dir) -> RayInfo:
+        """ Make objects for the intersect() method to modify. """
+        ray_info = RayInfo()
+        ray_info.hitprim = self.ray_geo.intersect(
+            ray_origin, ray_dir, 
+            ray_info.hitpos, ray_info.hitnormal, ray_info.hituvw
+        )
+        return ray_info
+    # end intersect
+
+    def minPos(self, xform_info: XformInfo) -> None:
+        """ Find the nearset prim pos in Guide geo.
+        """
+        primuv: PrimUV = PrimUV.from_tuple(
+            self.ray_geo.nearestPrim(xform_info.position))
+        if not primuv.prim:
+            return
+        
+        real_uv_coords = hou.Vector2(primuv.u, primuv.v)
+        unit_coords = primuv.prim.primuvConvert(real_uv_coords, 0)
+        xform_info.position = primuv.prim.positionAtInterior(
+            unit_coords.x(), unit_coords.y())
+    # end minPos
+
     def setPointTransform(self, xform_info: XformInfo) -> None:
         """ Set Point Transform based on handle parms. 
         """
@@ -176,26 +222,16 @@ class GeometryParm:
         self.updateGeometryData()
     # end setPointTransform
 
-    def isInputGeometryValid(self) -> bool:
-        input_geo: hou.Geometry = self.node.node('IN_geo').geometry()
-        contain_polygon =  input_geo.containsPrimType(hou.primType.Polygon)
-        if contain_polygon and input_geo.iterPrims():
-            self.ray_geo.copy(input_geo)
-            return True
-            
-        self.ray_geo.clear()            
-        return False
-    # end isInputGeometryValid
-
-    def intersect(self, ray_origin, ray_dir) -> RayInfo:
-        """ Make objects for the intersect() method to modify. """
-        ray_info = RayInfo()
-        ray_info.hitprim = self.ray_geo.intersect(
-            ray_origin, ray_dir, 
-            ray_info.hitpos, ray_info.hitnormal, ray_info.hituvw
-        )
-        return ray_info
-    # end intersect
+    def snapToGuide(self, xform_info) -> None:
+        """ Find the minimum position from guide 
+            and snap the point onto it.
+        """
+        points = self.getSelection()
+        if not points:
+            return
+        
+        self.minPos(xform_info)
+    # end snapToGuide
 # end GeometryParm
 
 
@@ -236,7 +272,7 @@ class State:
     # end onInterrupt
 
     def onResume(self, kwargs) -> None:
-        self.gp.isInputGeometryValid()
+        self.gp.isGuideValid()
         self.scene_viewer.setPromptMessage(State.MSG)
     # end onResume
 
@@ -275,13 +311,13 @@ class State:
         reason: hou.uiEventReason = ui_event.reason()
         device: hou.UIEventDevice = ui_event.device()
         consumed = False
-        
+
         if device.isLeftButton():
             ray_origin, ray_dir = ui_event.ray()
 
             xform_info = XformInfo()
-            succeed = self.gp.isInputGeometryValid()
-            if succeed:
+            succeed = self.gp.isGuideValid()
+            if self.node.parm('enable_guide') and succeed:
                 ray_info: RayInfo = self.gp.intersect(ray_origin, ray_dir)
                 if ray_info.hitprim < 0:
                     return consumed
@@ -387,8 +423,8 @@ class State:
         handle_name = kwargs['handle']
         parms = kwargs['parms']
         prev_parms = kwargs['prev_parms']
-        ui_event: hou.UIEvent = kwargs['ui_event']
-
+        ui_event = kwargs['ui_event']
+        
         xform_info = XformInfo()
         xform_info.position = hou.Vector3(
             (parms['tx'], parms['ty'], parms['tz']))
@@ -398,7 +434,11 @@ class State:
             (parms['sx'], parms['sy'], parms['sz'])) 
         xform_info.uniform_scale = parms['uniform_scale']
 
+        if self.node.parm('enable_guide'):
+            self.gp.snapToGuide(xform_info)
+            
         self.gp.setPointTransform(xform_info)
+        self.xform_handle.update()
     # end onHandleToState
 
     def onEndHandleToState(self, kwargs) -> None:
